@@ -1,0 +1,124 @@
+name: Build iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      signed:
+        description: 'Create signed IPA (requires Apple signing secrets)'
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      SCHEME: LaporanKeuanganHarian
+      PROJECT: LaporanKeuanganHarian.xcodeproj
+      ARCHIVE_PATH: ${{ github.workspace }}/build/LaporanKeuanganHarian.xcarchive
+      EXPORT_PATH: ${{ github.workspace }}/build/export
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Select Xcode
+        run: |
+          xcode-select -p
+          xcodebuild -version
+
+      - name: Show project settings
+        run: |
+          xcodebuild -project "$PROJECT" -scheme "$SCHEME" -showBuildSettings | grep -E 'PRODUCT_BUNDLE_IDENTIFIER|IPHONEOS_DEPLOYMENT_TARGET|SWIFT_VERSION' || true
+
+      - name: Install Apple signing certificate and provisioning profile
+        if: ${{ inputs.signed == true }}
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+        run: bash scripts/install-signing.sh
+
+      - name: Archive unsigned build
+        if: ${{ inputs.signed != true }}
+        run: |
+          mkdir -p build
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Archive signed build
+        if: ${{ inputs.signed == true }}
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+          PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_PROVISIONING_PROFILE_NAME }}
+        run: |
+          mkdir -p build
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_SPECIFIER" \
+            CODE_SIGN_STYLE=Manual
+
+      - name: Prepare export options
+        if: ${{ inputs.signed == true }}
+        env:
+          PROFILE_NAME: ${{ secrets.IOS_PROVISIONING_PROFILE_NAME }}
+          DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :teamID $DEVELOPMENT_TEAM" scripts/ExportOptions.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :teamID string $DEVELOPMENT_TEAM" scripts/ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Set :provisioningProfiles:com.laporankeuanganharian.ios $PROFILE_NAME" scripts/ExportOptions.plist
+
+      - name: Export signed IPA
+        if: ${{ inputs.signed == true }}
+        run: |
+          mkdir -p "$EXPORT_PATH"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist scripts/ExportOptions.plist
+
+      - name: Upload unsigned archive
+        if: ${{ inputs.signed != true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaporanKeuanganHarian-xcarchive
+          path: build/LaporanKeuanganHarian.xcarchive
+          if-no-files-found: error
+
+      - name: Upload signed IPA
+        if: ${{ inputs.signed == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaporanKeuanganHarian-IPA
+          path: build/export/*.ipa
+          if-no-files-found: error
+
+      - name: Upload export metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/*.xcresult
+            build/export/*.plist
+          if-no-files-found: ignore
+
+      - name: Clean signing material
+        if: ${{ always() && inputs.signed == true }}
+        run: bash scripts/cleanup-signing.sh
