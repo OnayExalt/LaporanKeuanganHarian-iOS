@@ -18,8 +18,9 @@ jobs:
   build:
     runs-on: macos-15
     env:
-      SCHEME: LaporanKeuanganHarian
       PROJECT: LaporanKeuanganHarian.xcodeproj
+      TARGET: LaporanKeuanganHarian
+      SCHEME: LaporanKeuanganHarian
       ARCHIVE_PATH: ${{ github.workspace }}/build/LaporanKeuanganHarian.xcarchive
       EXPORT_PATH: ${{ github.workspace }}/build/export
 
@@ -27,14 +28,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Select Xcode
+      - name: Select Xcode and inspect SDKs
         run: |
           xcode-select -p
           xcodebuild -version
+          xcodebuild -showsdks
 
-      - name: Show project settings
+      - name: Verify iOS target
         run: |
-          xcodebuild -project "$PROJECT" -scheme "$SCHEME" -showBuildSettings | grep -E 'PRODUCT_BUNDLE_IDENTIFIER|IPHONEOS_DEPLOYMENT_TARGET|SWIFT_VERSION' || true
+          xcodebuild -project "$PROJECT" -target "$TARGET" -showBuildSettings | grep -E 'PRODUCT_BUNDLE_IDENTIFIER|SDKROOT|SUPPORTED_PLATFORMS|TARGETED_DEVICE_FAMILY|IPHONEOS_DEPLOYMENT_TARGET|SWIFT_VERSION'
 
       - name: Install Apple signing certificate and provisioning profile
         if: ${{ inputs.signed == true }}
@@ -45,35 +47,39 @@ jobs:
           KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
         run: bash scripts/install-signing.sh
 
-      - name: Archive unsigned build
+      - name: Archive unsigned iOS build
         if: ${{ inputs.signed != true }}
         run: |
+          set -o pipefail
           mkdir -p build
           xcodebuild archive \
             -project "$PROJECT" \
-            -scheme "$SCHEME" \
+            -target "$TARGET" \
             -configuration Release \
+            -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -archivePath "$ARCHIVE_PATH" \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGNING_REQUIRED=NO | tee build/xcodebuild.log
 
-      - name: Archive signed build
+      - name: Archive signed iOS build
         if: ${{ inputs.signed == true }}
         env:
           DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
           PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_PROVISIONING_PROFILE_NAME }}
         run: |
+          set -o pipefail
           mkdir -p build
           xcodebuild archive \
             -project "$PROJECT" \
-            -scheme "$SCHEME" \
+            -target "$TARGET" \
             -configuration Release \
+            -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -archivePath "$ARCHIVE_PATH" \
             DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
             PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_SPECIFIER" \
-            CODE_SIGN_STYLE=Manual
+            CODE_SIGN_STYLE=Manual | tee build/xcodebuild.log
 
       - name: Prepare export options
         if: ${{ inputs.signed == true }}
@@ -82,16 +88,17 @@ jobs:
           DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
         run: |
           /usr/libexec/PlistBuddy -c "Set :teamID $DEVELOPMENT_TEAM" scripts/ExportOptions.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :teamID string $DEVELOPMENT_TEAM" scripts/ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Set :provisioningProfiles:com.laporankeuanganharian.ios $PROFILE_NAME" scripts/ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Set :provisioningProfiles:com.laporankeuanganharian.ios $PROFILE_NAME" scripts/ExportOptions.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:com.laporankeuanganharian.ios string $PROFILE_NAME" scripts/ExportOptions.plist
 
       - name: Export signed IPA
         if: ${{ inputs.signed == true }}
         run: |
+          set -o pipefail
           mkdir -p "$EXPORT_PATH"
           xcodebuild -exportArchive \
             -archivePath "$ARCHIVE_PATH" \
             -exportPath "$EXPORT_PATH" \
-            -exportOptionsPlist scripts/ExportOptions.plist
+            -exportOptionsPlist scripts/ExportOptions.plist | tee build/export.log
 
       - name: Upload unsigned archive
         if: ${{ inputs.signed != true }}
@@ -109,14 +116,12 @@ jobs:
           path: build/export/*.ipa
           if-no-files-found: error
 
-      - name: Upload export metadata
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: |
-            build/*.xcresult
-            build/export/*.plist
+          path: build/
           if-no-files-found: ignore
 
       - name: Clean signing material
